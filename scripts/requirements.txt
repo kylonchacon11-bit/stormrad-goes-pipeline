@@ -1,0 +1,6 @@
+satpy
+goes2go
+rasterio
+rio-cogeo
+netcdf4
+requests
