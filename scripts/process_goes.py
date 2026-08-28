@@ -1,74 +1,56 @@
+"""Download latest GOES-19 (East) CONUS MCMIP and write a local NetCDF."""
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from satpy import Scene
-from goes2go import GOES
-import rasterio
-from rio_cogeo.cogeo import cog_translate
-from rio_cogeo.profiles import cog_profiles
 
-DATA_DIR = Path("data")
+from goes2go import GOES
+
+DATA_DIR = Path(os.environ.get("GOES_DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Operational GOES-East since 2025-04-07
+SATELLITE = 19
+PRODUCT = "ABI-L2-MCMIPC"  # multi-channel cloud/moisture, CONUS
+DOMAIN = "C"
+
 def process_latest_conus():
-    print("Initializing GOES-19 CONUS download...")
-    
-    # Explicitly force GOES-19 (GOES-East active operational satellite)
+    print("Initializing GOES-19 CONUS download (noaa-goes19)...")
+
     goes = GOES(
-        satellite=19,
-        product="ABI-L2-MCMIPC",
-        domain="C",
+        satellite=SATELLITE,  # required — do not rely on config.toml default (often 16)
+        product=PRODUCT,
+        domain=DOMAIN,
     )
-    
-    # Use timerange to safely find recent files without hourly prefix errors
+
+    # latest() only probes the current UTC hour; if that prefix is empty it raises
+    # FileNotFoundError. Prefer a short lookback window.
     df = goes.timerange(recent="180min")
     if df is None or getattr(df, "empty", True):
-        raise ValueError("No recent GOES-19 CONUS MCMIPC files found on S3 (noaa-goes19).")
-    
-    if "start" in df.columns:
-        df = df.sort_values("start")
-    
-    latest_row = df.iloc[-1]
-    print(f"Latest file record found: {latest_row.get('file', latest_row)}")
-    
-    # Download the NetCDF file locally using goes2go helper
-    local_nc = goes.download(df.iloc[[-1]])
-    if isinstance(local_nc, list):
-        local_nc = local_nc[0]
-        
-    print(f"Downloaded NetCDF to: {local_nc}")
-    
-    # Load into Satpy Scene
-    print("Loading bands into Satpy...")
-    scn = Scene(filenames=local_nc, reader='abi_l2_mcmip')
-    scn.load(['geocolor'])
-    
-    # Reproject to Web Mercator (EPSG:3857)
-    print("Reprojecting to EPSG:3857...")
-    projected_scn = scn.resample('EPSG:3857', radius_of_influence=5000)
-    
-    temp_tif = DATA_DIR / "temp_geocolor.tif"
-    final_cog = DATA_DIR / "geocolor_latest.tif"
-    
-    projected_scn.save_datasets(writer='geotiff', filename=str(temp_tif))
-    
-    # Convert to Cloud Optimized GeoTIFF (COG)
-    print("Generating Cloud Optimized GeoTIFF (COG)...")
-    profile = cog_profiles.get("jpeg")
-    
-    cog_translate(
-        str(temp_tif),
-        str(final_cog),
-        profile,
-        in_memory=False,
-        overview_level=5,
-        quiet=True
-    )
-    
-    # Clean up temp file
-    if temp_tif.exists():
-        temp_tif.unlink()
-        
-    print(f"Successfully generated COG at {final_cog}")
+        # Fallback: try latest() only after timerange failed
+        print("timerange empty; trying goes.latest()...")
+        ds = goes.latest()
+    else:
+        if "start" in df.columns:
+            df = df.sort_values("start")
+        row = df.iloc[-1]
+        print(f"Latest scan: {row.get('file', row)}")
+        # nearesttime downloads + opens the scan closest to that time
+        t = row["start"] if "start" in row.index else None
+        if t is not None:
+            ds = goes.nearesttime(str(t))
+        else:
+            ds = goes.latest()
+
+    out = DATA_DIR / "mcmip_latest.nc"
+    if hasattr(ds, "to_netcdf"):
+        ds.to_netcdf(out)
+        print(f"Wrote {out}")
+    else:
+        # Some goes2go versions return a path / list of paths
+        print(f"Download result (not Dataset): {ds!r}")
+
+    return str(out)
 
 if __name__ == "__main__":
     process_latest_conus()
