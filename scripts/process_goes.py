@@ -1,56 +1,64 @@
-"""Download latest GOES-19 (East) CONUS MCMIP and write a local NetCDF."""
+"""Fetch latest GOES-19 East CONUS MCMIP and write a COG-friendly intermediate."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from goes2go import GOES
+# Write goes2go config BEFORE importing GOES so defaults cannot stay on 16
+_CFG = Path.home() / ".config" / "goes2go" / "config.toml"
+_CFG.parent.mkdir(parents=True, exist_ok=True)
+_CFG.write_text(
+    '[default]\n'
+    'satellite = 19\n'
+    'product = "ABI-L2-MCMIPC"\n'
+    'domain = "C"\n'
+    'save_dir = "data/goes"\n'
+)
+
+from goes2go import GOES  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("GOES_DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Operational GOES-East since 2025-04-07
-SATELLITE = 19
-PRODUCT = "ABI-L2-MCMIPC"  # multi-channel cloud/moisture, CONUS
-DOMAIN = "C"
 
-def process_latest_conus():
-    print("Initializing GOES-19 CONUS download (noaa-goes19)...")
+def process_latest_conus() -> str:
+    print("Initializing GOES-19 CONUS download (bucket noaa-goes19)...")
 
     goes = GOES(
-        satellite=SATELLITE,  # required — do not rely on config.toml default (often 16)
-        product=PRODUCT,
-        domain=DOMAIN,
+        satellite=19,  # explicit — never rely on package default
+        product="ABI-L2-MCMIPC",
+        domain="C",
     )
+    print(f"GOES object: satellite={getattr(goes, 'satellite', '?')} product={getattr(goes, 'product', '?')}")
 
-    # latest() only probes the current UTC hour; if that prefix is empty it raises
-    # FileNotFoundError. Prefer a short lookback window.
+    # Avoid goes.latest() — it only lists the current UTC hour and raises if empty
     df = goes.timerange(recent="180min")
     if df is None or getattr(df, "empty", True):
-        # Fallback: try latest() only after timerange failed
-        print("timerange empty; trying goes.latest()...")
-        ds = goes.latest()
-    else:
-        if "start" in df.columns:
-            df = df.sort_values("start")
-        row = df.iloc[-1]
-        print(f"Latest scan: {row.get('file', row)}")
-        # nearesttime downloads + opens the scan closest to that time
-        t = row["start"] if "start" in row.index else None
-        if t is not None:
-            ds = goes.nearesttime(str(t))
-        else:
-            ds = goes.latest()
+        raise ValueError(
+            "No GOES-19 MCMIPC files in the last 180 minutes on noaa-goes19. "
+            "Check S3 / outages."
+        )
 
-    out = DATA_DIR / "mcmip_latest.nc"
+    if "start" in df.columns:
+        df = df.sort_values("start")
+    row = df.iloc[-1]
+    print(f"Latest file row: {row.get('file', row)}")
+
+    t = row["start"] if "start" in row.index else None
+    if t is not None:
+        ds = goes.nearesttime(str(t))
+    else:
+        ds = goes.nearesttime()  # library default window
+
+    out_nc = DATA_DIR / "mcmip_latest.nc"
     if hasattr(ds, "to_netcdf"):
-        ds.to_netcdf(out)
-        print(f"Wrote {out}")
+        ds.to_netcdf(out_nc)
+        print(f"Wrote {out_nc}")
     else:
-        # Some goes2go versions return a path / list of paths
-        print(f"Download result (not Dataset): {ds!r}")
+        print(f"Unexpected return type from nearesttime: {type(ds)} {ds!r}")
 
-    return str(out)
+    return str(out_nc)
+
 
 if __name__ == "__main__":
     process_latest_conus()
