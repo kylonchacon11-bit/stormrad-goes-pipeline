@@ -7,16 +7,24 @@ from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
 
 def process_latest_conus():
-    print("Initializing GOES-16/19 CONUS download...")
+    print("Initializing GOES-19 CONUS download...")
     
     os.makedirs("data", exist_ok=True)
     
-    # Fetch latest CONUS MCMIP data using goes2go
-    goes = GOES(satellite=16, product="ABI-L2-MCMIP", domain="C")
-    latest_file = goes.latest()
+    # Use GOES-19 (active East satellite) and search recent files to avoid strict hourly folder misses
+    goes = GOES(satellite=19, product="ABI-L2-MCMIP", domain="C")
     
-    print(f"Latest file found: {latest_file}")
-    local_nc = goes.download(latest_file)
+    # Get files from the last 60 minutes
+    df = goes.timeranger(recent="60min")
+    if df.empty:
+        raise ValueError("No recent GOES files found on S3.")
+    
+    # Pick the absolute latest file path from the dataframe
+    latest_file_row = df.iloc[-1]
+    print(f"Latest file found: {latest_file_row['file']}")
+    
+    # Download the NetCDF file locally
+    local_nc = goes.download(latest_file_row)
     
     # Load into Satpy Scene
     print("Loading bands into Satpy...")
