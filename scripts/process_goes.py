@@ -1,85 +1,74 @@
 import os
 from pathlib import Path
-
-from goes2go import GOES
 from satpy import Scene
-from pyresample import create_area_def
+from goes2go import GOES
+import rasterio
 from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
 
 DATA_DIR = Path("data")
-TEMP_TIF = DATA_DIR / "temp_geocolor.tif"
-FINAL_COG = DATA_DIR / "geocolor_latest.tif"
-
-# CONUS-ish Web Mercator footprint (adjust as needed)
-WEB_MERCATOR_CONUS = create_area_def(
-    "web_mercator_conus",
-    {"proj": "epsg:3857"},
-    area_extent=(-14000000, 2000000, -7000000, 6500000),  # rough CONUS
-    resolution=2000,  # meters; raise for speed, lower for detail
-)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def process_latest_conus():
     print("Initializing GOES-19 CONUS download...")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # L1b CONUS radiance is the usual source for true-color style RGBs
-    goes = GOES(satellite=19, product="ABI-L1b-RadC", domain="C")
-
-    df = goes.timerange(recent="120min")
-    if df is None or df.empty:
-        raise ValueError("No recent GOES-19 CONUS files found on S3.")
-
-    # Newest by start time if available
+    
+    # Explicitly force GOES-19 (GOES-East active operational satellite)
+    goes = GOES(
+        satellite=19,
+        product="ABI-L2-MCMIPC",
+        domain="C",
+    )
+    
+    # Use timerange to safely find recent files without hourly prefix errors
+    df = goes.timerange(recent="180min")
+    if df is None or getattr(df, "empty", True):
+        raise ValueError("No recent GOES-19 CONUS MCMIPC files found on S3 (noaa-goes19).")
+    
     if "start" in df.columns:
         df = df.sort_values("start")
-    latest = df.iloc[-1]
-    file_key = latest["file"] if "file" in latest.index else latest.iloc[0]
-    print(f"Latest file found: {file_key}")
-
-    # Download (API varies slightly by goes2go version)
-    local_paths = goes.download(latest)
-    if isinstance(local_paths, (str, Path)):
-        filenames = [str(local_paths)]
-    elif hasattr(local_paths, "__iter__"):
-        filenames = [str(p) for p in local_paths]
-    else:
-        filenames = [str(local_paths)]
-
+    
+    latest_row = df.iloc[-1]
+    print(f"Latest file record found: {latest_row.get('file', latest_row)}")
+    
+    # Download the NetCDF file locally using goes2go helper
+    local_nc = goes.download(df.iloc[[-1]])
+    if isinstance(local_nc, list):
+        local_nc = local_nc[0]
+        
+    print(f"Downloaded NetCDF to: {local_nc}")
+    
+    # Load into Satpy Scene
     print("Loading bands into Satpy...")
-    scn = Scene(filenames=filenames, reader="abi_l1b")
-    # true_color needs C01, C02, C03 (Satpy loads deps automatically)
-    scn.load(["true_color"])
-
+    scn = Scene(filenames=local_nc, reader='abi_l2_mcmip')
+    scn.load(['geocolor'])
+    
+    # Reproject to Web Mercator (EPSG:3857)
     print("Reprojecting to EPSG:3857...")
-    projected = scn.resample(WEB_MERCATOR_CONUS)
-
-    print("Writing temporary GeoTIFF...")
-    if TEMP_TIF.exists():
-        TEMP_TIF.unlink()
-    projected.save_datasets(
-        writer="geotiff",
-        filename=str(TEMP_TIF),
-        enhance=True,
-        dtype="uint8",
-    )
-
+    projected_scn = scn.resample('EPSG:3857', radius_of_influence=5000)
+    
+    temp_tif = DATA_DIR / "temp_geocolor.tif"
+    final_cog = DATA_DIR / "geocolor_latest.tif"
+    
+    projected_scn.save_datasets(writer='geotiff', filename=str(temp_tif))
+    
+    # Convert to Cloud Optimized GeoTIFF (COG)
     print("Generating Cloud Optimized GeoTIFF (COG)...")
     profile = cog_profiles.get("jpeg")
-    # Keep alpha if present; jpeg profile is RGB-friendly
+    
     cog_translate(
-        str(TEMP_TIF),
-        str(FINAL_COG),
+        str(temp_tif),
+        str(final_cog),
         profile,
         in_memory=False,
-        quiet=True,
+        overview_level=5,
+        quiet=True
     )
-
-    if TEMP_TIF.exists():
-        TEMP_TIF.unlink()
-
-    print(f"Successfully generated COG at {FINAL_COG}")
-    return str(FINAL_COG)
+    
+    # Clean up temp file
+    if temp_tif.exists():
+        temp_tif.unlink()
+        
+    print(f"Successfully generated COG at {final_cog}")
 
 if __name__ == "__main__":
     process_latest_conus()
