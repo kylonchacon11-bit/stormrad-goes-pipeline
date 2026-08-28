@@ -1,6 +1,22 @@
-satpy
+# GOES download + NetCDF
 goes2go
+s3fs
+xarray
+netcdf4
+numpy
+
+# GeoTIFF / COG
 rasterio
 rio-cogeo
-netcdf4
+rioxarray
+pyproj
+
+# Optional: better RGB resize in process_goes.py
+opencv-python-headless
+
+# Optional later: full Satpy remapping / true_color
+satpy
+pyresample
+
+# HTTP helpers (if you add URL checks later)
 requests
